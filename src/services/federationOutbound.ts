@@ -116,8 +116,8 @@ export async function routeToFederation(params: {
       id: outboxId,
       tezId: params.tezId,
       targetHost,
-      targetAddresses: JSON.stringify(addresses),
-      bundle: JSON.stringify(bundle),
+      targetAddresses: addresses,
+      bundle: bundle as unknown as Record<string, unknown>,
       status: "pending",
       attempts: 0,
       lastAttemptAt: null,
@@ -154,8 +154,8 @@ async function processOutboxEntry(outboxId: string): Promise<void> {
     // Discover remote server
     const remote = await discoverServer(entry.targetHost);
 
-    // Sign the request
-    const bundleBody = entry.bundle;
+    // Sign the request (Drizzle deserializes JSON columns, so re-serialize for HTTP)
+    const bundleBody = JSON.stringify(entry.bundle);
     const inboxUrl = `https://${entry.targetHost}${remote.federationInbox}`;
     const inboxPath = remote.federationInbox;
 
@@ -191,8 +191,8 @@ async function processOutboxEntry(outboxId: string): Promise<void> {
         })
         .where(eq(federationOutbox.id, outboxId));
 
-      // Record federated_tez
-      const bundle = JSON.parse(entry.bundle);
+      // Record federated_tez (entry.bundle already deserialized by Drizzle)
+      const bundle = entry.bundle as Record<string, any>;
       await db.insert(federatedTez).values({
         id: randomUUID(),
         localTezId: entry.tezId,
@@ -210,7 +210,7 @@ async function processOutboxEntry(outboxId: string): Promise<void> {
         targetId: entry.tezId,
         metadata: {
           remoteHost: entry.targetHost,
-          recipientCount: JSON.parse(entry.targetAddresses).length,
+          recipientCount: entry.targetAddresses.length,
         },
       });
     } else {

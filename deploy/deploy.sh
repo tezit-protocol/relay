@@ -6,10 +6,10 @@
 set -euo pipefail
 
 # Configuration
-RELAY_HOST="${RELAY_HOST:-relay.mypa.chat}"
+RELAY_HOST="${RELAY_HOST:-relay.tezit.com}"
 SSH_USER="${SSH_USER:-root}"
 APP_DIR="/var/tezit-relay/app"
-REPO_URL="https://github.com/ragurob/tezit-relay.git"
+REPO_URL="https://github.com/tezit-protocol/relay.git"
 
 # Resolve server IP from first argument or environment
 SERVER_IP="${1:-${RELAY_SERVER_IP:-}}"
