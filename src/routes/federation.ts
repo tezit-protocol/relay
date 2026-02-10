@@ -24,17 +24,29 @@ import { verifyRequest, extractKeyId } from "../services/httpSignature.js";
 import { validateBundle, type FederationBundle } from "../services/federationBundle.js";
 import { recordAudit } from "../services/audit.js";
 import { sendWelcomeCookie } from "../services/welcomeCookie.js";
+import { sanitizeText, sanitizeContextItem } from "../services/sanitize.js";
+import { rateLimit } from "../middleware/rateLimit.js";
 
 export const federationRoutes = Router();
+
+// Issue #4: Stricter rate limits for federation endpoints
+const federationRateLimit = rateLimit({ windowMs: 60_000, max: 30 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /federation/inbox — Receive a Tez from a remote server
 // ─────────────────────────────────────────────────────────────────────────────
 
-federationRoutes.post("/inbox", async (req, res) => {
+federationRoutes.post("/inbox", federationRateLimit, async (req, res) => {
   try {
     if (!config.federationEnabled) {
       res.status(404).json({ error: { code: "FEDERATION_DISABLED", message: "Federation is not enabled" } });
+      return;
+    }
+
+    // Issue #14: Enforce bundle size limit (1MB)
+    const contentLength = parseInt(req.headers["content-length"] || "0", 10);
+    if (contentLength > config.maxTezSizeBytes) {
+      res.status(413).json({ error: { code: "BUNDLE_TOO_LARGE", message: "Federation bundle exceeds size limit" } });
       return;
     }
 
@@ -44,6 +56,7 @@ federationRoutes.post("/inbox", async (req, res) => {
     const digest = req.headers["digest"] as string;
     const date = req.headers["date"] as string;
     const host = req.headers["host"] as string;
+    const nonce = req.headers["x-request-nonce"] as string | undefined;
 
     if (!signature || !signatureInput || !digest || !date) {
       res.status(401).json({ error: { code: "MISSING_SIGNATURE", message: "Missing HTTP signature headers" } });
@@ -82,7 +95,7 @@ federationRoutes.post("/inbox", async (req, res) => {
       return;
     }
 
-    // 3. Verify signature
+    // 3. Verify signature (Issue #9: pass nonce for replay protection)
     const body = JSON.stringify(req.body);
     const isValid = verifyRequest({
       method: req.method,
@@ -94,6 +107,7 @@ federationRoutes.post("/inbox", async (req, res) => {
       signatureInput,
       body,
       publicKeyBase64: sender.publicKey,
+      nonce,
     });
 
     if (!isValid) {
@@ -109,7 +123,21 @@ federationRoutes.post("/inbox", async (req, res) => {
       return;
     }
 
-    // 5. Deliver to local recipients
+    // Issue #2: Replay protection — reject duplicate bundle hashes
+    if (bundle.bundle_hash) {
+      const existing = await db
+        .select()
+        .from(federatedTez)
+        .where(eq(federatedTez.bundleHash, bundle.bundle_hash))
+        .limit(1);
+
+      if (existing.length > 0) {
+        res.status(409).json({ error: { code: "DUPLICATE_BUNDLE", message: "Bundle already received (replay rejected)" } });
+        return;
+      }
+    }
+
+    // 5. Identify local recipients
     const identity = getIdentity();
     const localRecipients = bundle.to.filter((addr) => {
       const atIndex = addr.lastIndexOf("@");
@@ -121,53 +149,11 @@ federationRoutes.post("/inbox", async (req, res) => {
       return;
     }
 
-    const now = new Date().toISOString();
-    const localTezIds: string[] = [];
+    // Issue #12: Validate recipients exist BEFORE creating the tez
+    const validRecipients: { addr: string; contactId: string }[] = [];
     const notFound: string[] = [];
 
-    // Create local tez for each recipient
-    const localTezId = randomUUID();
-    const threadId = localTezId;
-
-    await db.insert(tez).values({
-      id: localTezId,
-      teamId: null,
-      conversationId: null,
-      threadId,
-      parentTezId: null,
-      surfaceText: bundle.tez.surfaceText,
-      type: bundle.tez.type || "note",
-      urgency: bundle.tez.urgency || "normal",
-      actionRequested: bundle.tez.actionRequested ?? null,
-      senderUserId: bundle.from,
-      visibility: "dm",
-      status: "active",
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    // Create context layers
-    for (const ctx of bundle.context) {
-      await db.insert(tezContext).values({
-        id: randomUUID(),
-        tezId: localTezId,
-        layer: ctx.layer,
-        content: ctx.content,
-        mimeType: ctx.mimeType ?? null,
-        confidence: ctx.confidence ?? null,
-        source: ctx.source ?? null,
-        derivedFrom: null,
-        createdAt: now,
-        createdBy: bundle.from,
-      });
-    }
-
-    // Record recipients
     for (const addr of localRecipients) {
-      const atIndex = addr.lastIndexOf("@");
-      const userId = addr.slice(0, atIndex);
-
-      // Verify recipient exists
       const contactRows = await db
         .select()
         .from(contacts)
@@ -176,19 +162,71 @@ federationRoutes.post("/inbox", async (req, res) => {
 
       if (contactRows.length === 0) {
         notFound.push(addr);
-        continue;
+      } else {
+        validRecipients.push({ addr, contactId: contactRows[0].id });
       }
+    }
 
+    // If NO valid recipients, reject without creating orphaned tez
+    if (validRecipients.length === 0) {
+      res.status(422).json({
+        error: { code: "RECIPIENTS_NOT_FOUND", message: "No valid recipients found" },
+        notFound,
+      });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const localTezId = randomUUID();
+    const threadId = localTezId;
+
+    // Issue #5: Sanitize surface text and context from external source
+    const sanitizedSurface = sanitizeText(bundle.tez.surfaceText);
+
+    await db.insert(tez).values({
+      id: localTezId,
+      teamId: null,
+      conversationId: null,
+      threadId,
+      parentTezId: null,
+      surfaceText: sanitizedSurface,
+      type: bundle.tez.type || "note",
+      urgency: bundle.tez.urgency || "normal",
+      actionRequested: bundle.tez.actionRequested ? sanitizeText(bundle.tez.actionRequested) : null,
+      senderUserId: bundle.from,
+      visibility: "dm",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Issue #5: Sanitize context layers from external source
+    for (const ctx of bundle.context) {
+      const { content, mimeType } = sanitizeContextItem(ctx);
+      await db.insert(tezContext).values({
+        id: randomUUID(),
+        tezId: localTezId,
+        layer: ctx.layer,
+        content,
+        mimeType,
+        confidence: ctx.confidence ?? null,
+        source: ctx.source ?? null,
+        derivedFrom: null,
+        createdAt: now,
+        createdBy: bundle.from,
+      });
+    }
+
+    // Record recipients (already validated above)
+    for (const { contactId } of validRecipients) {
       await db.insert(tezRecipients).values({
         tezId: localTezId,
-        userId: contactRows[0].id,
+        userId: contactId,
         deliveredAt: now,
         readAt: null,
         acknowledgedAt: null,
       });
     }
-
-    localTezIds.push(localTezId);
 
     // Record in federated_tez
     await db.insert(federatedTez).values({
@@ -216,25 +254,20 @@ federationRoutes.post("/inbox", async (req, res) => {
       metadata: {
         remoteServer: bundle.sender_server,
         remoteTezId: bundle.tez.id,
-        recipientCount: localRecipients.length,
+        recipientCount: validRecipients.length,
         notFoundCount: notFound.length,
       },
     });
 
     // 207 if some recipients not found, 200 otherwise
-    if (notFound.length > 0 && notFound.length < localRecipients.length) {
+    if (notFound.length > 0) {
       res.status(207).json({
         accepted: true,
-        localTezIds,
-        notFound,
-      });
-    } else if (notFound.length === localRecipients.length) {
-      res.status(422).json({
-        error: { code: "RECIPIENTS_NOT_FOUND", message: "No valid recipients found" },
+        localTezIds: [localTezId],
         notFound,
       });
     } else {
-      res.json({ accepted: true, localTezIds });
+      res.json({ accepted: true, localTezIds: [localTezId] });
     }
   } catch (err) {
     console.error("Federation inbox error:", err);
@@ -272,7 +305,7 @@ federationRoutes.get("/server-info", (_req, res) => {
 // POST /federation/verify — Trust handshake
 // ─────────────────────────────────────────────────────────────────────────────
 
-federationRoutes.post("/verify", async (req, res) => {
+federationRoutes.post("/verify", federationRateLimit, async (req, res) => {
   try {
     if (!config.federationEnabled) {
       res.status(404).json({ error: { code: "FEDERATION_DISABLED", message: "Federation is not enabled" } });

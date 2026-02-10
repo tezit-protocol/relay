@@ -17,6 +17,9 @@ import { createBundle } from "./federationBundle.js";
 import { discoverServer } from "./discovery.js";
 import { recordAudit } from "./audit.js";
 
+// Issue #11: In-memory dedup to prevent duplicate welcome cookies per server lifetime
+const welcomeSentTo = new Set<string>();
+
 const WELCOME_SURFACE = `Welcome to the Tezit Federation! Your handshake worked. We baked you some cookies to celebrate. Interrogate this tez to get the recipe.`;
 
 const WELCOME_CONTEXT_RECIPE = `# Original Nestle Toll House Chocolate Chip Cookies
@@ -84,6 +87,10 @@ For the protocol spec: https://tezit.com/protocol`;
  * Non-blocking — fires and forgets. Logs success/failure to audit.
  */
 export async function sendWelcomeCookie(targetHost: string): Promise<void> {
+  // Issue #11: Skip if already sent to this host in current process lifetime
+  if (welcomeSentTo.has(targetHost)) return;
+  welcomeSentTo.add(targetHost);
+
   try {
     const identity = getIdentity();
 

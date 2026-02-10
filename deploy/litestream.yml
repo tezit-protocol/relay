@@ -22,5 +22,7 @@ dbs:
         retention: 720h
         # Check for changes every 10 seconds
         sync-interval: 10s
-        # Encrypt at rest with AES-256
-        # validation-interval: 5m
+        # Issue #10: Encrypt at rest with AES-256
+        # Set LITESTREAM_ENCRYPTION_KEY in environment (32+ char random string)
+        encryption-key: ${LITESTREAM_ENCRYPTION_KEY}
+        validation-interval: 5m

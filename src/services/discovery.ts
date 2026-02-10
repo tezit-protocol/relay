@@ -5,8 +5,52 @@
  * Caches in-memory with 1-hour TTL. Falls back to DB cache on network failure.
  */
 
+import { promises as dnsPromises } from "dns";
 import { eq } from "drizzle-orm";
 import { db, federatedServers } from "../db/index.js";
+
+/**
+ * Issue #6: SSRF protection — block discovery requests to private/reserved IPs.
+ */
+function isPrivateIp(ip: string): boolean {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4) return false;
+  const [a, b] = parts;
+  if (a === 10) return true;                          // 10.0.0.0/8
+  if (a === 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12
+  if (a === 192 && b === 168) return true;             // 192.168.0.0/16
+  if (a === 127) return true;                          // 127.0.0.0/8
+  if (a === 169 && b === 254) return true;             // 169.254.0.0/16
+  if (a === 0) return true;                            // 0.0.0.0/8
+  return false;
+}
+
+function isBlockedHost(host: string): boolean {
+  const lower = host.toLowerCase();
+  if (lower === "localhost" || lower === "::1") return true;
+  if (lower.endsWith(".local") || lower.endsWith(".internal")) return true;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) return isPrivateIp(host);
+  return false;
+}
+
+async function validateHost(host: string): Promise<void> {
+  if (isBlockedHost(host)) {
+    throw new Error(`SSRF blocked: ${host} is a private/reserved address`);
+  }
+  try {
+    const addresses = await dnsPromises.resolve4(host);
+    for (const addr of addresses) {
+      if (isPrivateIp(addr)) {
+        throw new Error(`SSRF blocked: ${host} resolves to private IP ${addr}`);
+      }
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOTFOUND") {
+      throw new Error(`Discovery failed: ${host} does not resolve`);
+    }
+    if ((err as Error).message.startsWith("SSRF blocked")) throw err;
+  }
+}
 
 export interface RemoteServerInfo {
   host: string;
@@ -28,6 +72,7 @@ const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
  * Validates required fields.
  */
 async function fetchWellKnown(host: string): Promise<RemoteServerInfo> {
+  await validateHost(host);
   const url = `https://${host}/.well-known/tezit.json`;
   const res = await fetch(url, {
     headers: { Accept: "application/json" },

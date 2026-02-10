@@ -7,7 +7,7 @@
  */
 
 import { createHash, generateKeyPairSync, createPrivateKey, createPublicKey } from "crypto";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from "fs";
 import { join } from "path";
 import { config } from "../config.js";
 
@@ -21,10 +21,11 @@ export interface ServerIdentity {
 let _identity: ServerIdentity | null = null;
 
 /**
- * Derive serverId from public key: SHA-256 hash, hex, first 16 chars.
+ * Derive serverId from public key: full SHA-256 hash, hex (64 chars).
+ * Issue #8: Use full hash for 256 bits of entropy instead of truncated 64 bits.
  */
 function deriveServerId(publicKeyBase64: string): string {
-  return createHash("sha256").update(publicKeyBase64).digest("hex").slice(0, 16);
+  return createHash("sha256").update(publicKeyBase64).digest("hex");
 }
 
 /**
@@ -40,6 +41,8 @@ function generateAndPersist(dataDir: string): { publicKeyBase64: string; private
   mkdirSync(dataDir, { recursive: true });
   writeFileSync(join(dataDir, "server.pub"), publicKeyBase64, "utf-8");
   writeFileSync(join(dataDir, "server.key"), privateKeyPem, "utf-8");
+  // Issue #7: Restrict private key file permissions to owner-only
+  chmodSync(join(dataDir, "server.key"), 0o600);
 
   return { publicKeyBase64, privateKeyPem };
 }

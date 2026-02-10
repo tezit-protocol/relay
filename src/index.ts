@@ -16,16 +16,36 @@ import { unreadRoutes } from "./routes/unread.js";
 import { federationRoutes } from "./routes/federation.js";
 import { adminRoutes } from "./routes/admin.js";
 import { initIdentity, getIdentity } from "./services/identity.js";
+import { rateLimit } from "./middleware/rateLimit.js";
 
 const app = express();
 app.disable("x-powered-by");
 
-app.use(cors());
+// Issue #3: Configure CORS with explicit origins in production
+const corsOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(",").map((s) => s.trim())
+  : undefined; // undefined = allow all (dev default)
+
+app.use(
+  cors({
+    origin: config.nodeEnv === "production" && corsOrigins ? corsOrigins : true,
+    methods: ["GET", "POST", "PATCH", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    maxAge: 86400,
+  })
+);
 app.use(express.json({ limit: "1mb" }));
 
-// Health
+// Issue #4: Global rate limiting — 100 req/min per IP
+app.use(rateLimit({ windowMs: 60_000, max: 100 }));
+
+// Issue #17: Health — omit version in production
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "tezit-relay", version: "0.2.0" });
+  const response: Record<string, string> = { status: "ok", service: "tezit-relay" };
+  if (config.nodeEnv !== "production") {
+    response.version = "0.3.0";
+  }
+  res.json(response);
 });
 
 // .well-known/tezit.json — server discovery for federation

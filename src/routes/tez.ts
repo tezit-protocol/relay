@@ -18,6 +18,7 @@ import { assertTeamMember, assertTezAccess } from "../services/acl.js";
 import { recordAudit } from "../services/audit.js";
 import { config } from "../config.js";
 import { partitionRecipients, routeToFederation } from "../services/federationOutbound.js";
+import { sanitizeText, sanitizeContextItem } from "../services/sanitize.js";
 
 export const tezRoutes = Router();
 
@@ -59,16 +60,19 @@ tezRoutes.post("/share", authenticate, async (req, res) => {
     const tezId = body.id || randomUUID();
     const threadId = tezId; // root of a new thread
 
+    // Issue #5: Sanitize user input before storage
+    const sanitizedSurface = sanitizeText(body.surfaceText);
+
     // 1. Create the Tez
     await db.insert(tez).values({
       id: tezId,
       teamId: body.teamId,
       threadId,
       parentTezId: null,
-      surfaceText: body.surfaceText,
+      surfaceText: sanitizedSurface,
       type: body.type,
       urgency: body.urgency,
-      actionRequested: body.actionRequested ?? null,
+      actionRequested: body.actionRequested ? sanitizeText(body.actionRequested) : null,
       senderUserId: userId,
       visibility: body.visibility,
       status: "active",
@@ -76,14 +80,15 @@ tezRoutes.post("/share", authenticate, async (req, res) => {
       updatedAt: now,
     });
 
-    // 2. Create context items (the iceberg)
+    // 2. Create context items (the iceberg) — sanitized
     for (const ctx of body.context) {
+      const { content, mimeType } = sanitizeContextItem(ctx);
       await db.insert(tezContext).values({
         id: randomUUID(),
         tezId,
         layer: ctx.layer,
-        content: ctx.content,
-        mimeType: ctx.mimeType ?? null,
+        content,
+        mimeType,
         confidence: ctx.confidence ?? null,
         source: ctx.source ?? null,
         derivedFrom: null,
@@ -299,7 +304,7 @@ tezRoutes.post("/:id/reply", authenticate, async (req, res) => {
       teamId: parentTez.teamId ?? null,
       threadId,
       parentTezId: parentId,
-      surfaceText: body.surfaceText,
+      surfaceText: sanitizeText(body.surfaceText),
       type: body.type,
       urgency: "normal",
       actionRequested: null,
@@ -310,14 +315,15 @@ tezRoutes.post("/:id/reply", authenticate, async (req, res) => {
       updatedAt: now,
     });
 
-    // Context items for the reply
+    // Context items for the reply — sanitized
     for (const ctx of body.context) {
+      const { content, mimeType } = sanitizeContextItem(ctx);
       await db.insert(tezContext).values({
         id: randomUUID(),
         tezId: replyId,
         layer: ctx.layer,
-        content: ctx.content,
-        mimeType: ctx.mimeType ?? null,
+        content,
+        mimeType,
         confidence: ctx.confidence ?? null,
         source: ctx.source ?? null,
         derivedFrom: null,

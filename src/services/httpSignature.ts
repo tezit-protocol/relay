@@ -8,7 +8,7 @@
  * Digest: SHA-256 of the request body (prevents tampering).
  */
 
-import { createHash, createPrivateKey, createPublicKey, sign, verify } from "crypto";
+import { createHash, createPrivateKey, createPublicKey, sign, verify, randomUUID } from "crypto";
 
 export interface SignatureParams {
   method: string;
@@ -23,6 +23,7 @@ export interface SignedHeaders {
   Host: string;
   Date: string;
   Digest: string;
+  "X-Request-Nonce": string;
   Signature: string;
   "Signature-Input": string;
 }
@@ -37,10 +38,12 @@ export interface VerifyParams {
   signatureInput: string;
   body: string;
   publicKeyBase64: string;
+  nonce?: string;
 }
 
 /**
  * Create the signing string from request components.
+ * Issue #9: Includes nonce to prevent replay attacks.
  */
 function buildSigningString(params: {
   method: string;
@@ -48,13 +51,18 @@ function buildSigningString(params: {
   host: string;
   date: string;
   digest: string;
+  nonce?: string;
 }): string {
-  return [
+  const lines = [
     `(request-target): ${params.method.toLowerCase()} ${params.path}`,
     `host: ${params.host}`,
     `date: ${params.date}`,
     `digest: ${params.digest}`,
-  ].join("\n");
+  ];
+  if (params.nonce) {
+    lines.push(`x-request-nonce: ${params.nonce}`);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -72,6 +80,7 @@ export function computeDigest(body: string): string {
 export function signRequest(params: SignatureParams): SignedHeaders {
   const date = new Date().toUTCString();
   const digest = computeDigest(params.body);
+  const nonce = randomUUID(); // Issue #9: Unique nonce per request
 
   const signingString = buildSigningString({
     method: params.method,
@@ -79,6 +88,7 @@ export function signRequest(params: SignatureParams): SignedHeaders {
     host: params.host,
     date,
     digest,
+    nonce,
   });
 
   const privateKey = createPrivateKey(params.privateKeyPem);
@@ -88,8 +98,9 @@ export function signRequest(params: SignatureParams): SignedHeaders {
     Host: params.host,
     Date: date,
     Digest: digest,
+    "X-Request-Nonce": nonce,
     Signature: sig.toString("base64"),
-    "Signature-Input": `keyId="${params.keyId}",headers="(request-target) host date digest",algorithm="ed25519"`,
+    "Signature-Input": `keyId="${params.keyId}",headers="(request-target) host date digest x-request-nonce",algorithm="ed25519"`,
   };
 }
 
@@ -105,21 +116,22 @@ export function verifyRequest(params: VerifyParams): boolean {
       return false;
     }
 
-    // Verify the date is within 5 minutes
+    // Issue #13: Verify the date is within 60 seconds (reduced from 5 minutes)
     const requestDate = new Date(params.date);
     const now = new Date();
     const diffMs = Math.abs(now.getTime() - requestDate.getTime());
-    if (diffMs > 5 * 60 * 1000) {
+    if (diffMs > 60 * 1000) {
       return false;
     }
 
-    // Reconstruct signing string
+    // Reconstruct signing string (include nonce if present)
     const signingString = buildSigningString({
       method: params.method,
       path: params.path,
       host: params.host,
       date: params.date,
       digest: params.digest,
+      nonce: params.nonce,
     });
 
     // Verify signature
