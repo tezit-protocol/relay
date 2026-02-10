@@ -1,0 +1,26 @@
+# Litestream configuration for tezit-relay SQLite backup
+# Continuously replicates the SQLite database to DigitalOcean Spaces (S3-compatible)
+#
+# Setup:
+#   1. Create a DO Space (e.g., "tezit-backups" in nyc3)
+#   2. Generate Spaces access keys from DO control panel
+#   3. Set LITESTREAM_ACCESS_KEY_ID and LITESTREAM_SECRET_ACCESS_KEY in environment
+#   4. Copy this file to /etc/litestream.yml
+#   5. Enable the systemd service: systemctl enable --now litestream
+
+dbs:
+  - path: /var/tezit-relay/data/relay.db
+    replicas:
+      - type: s3
+        bucket: tezit-backups
+        path: relay/
+        endpoint: https://nyc3.digitaloceanspaces.com
+        region: nyc3
+        # Snapshot every 24 hours (in addition to continuous WAL replication)
+        snapshot-interval: 24h
+        # Retain snapshots for 30 days
+        retention: 720h
+        # Check for changes every 10 seconds
+        sync-interval: 10s
+        # Encrypt at rest with AES-256
+        # validation-interval: 5m
